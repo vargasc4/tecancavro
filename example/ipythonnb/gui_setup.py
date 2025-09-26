@@ -2,7 +2,7 @@ from __future__ import print_function
 from warnings import filterwarnings
 filterwarnings('ignore', module='IPython.html.widgets')
 
-from IPython.html import widgets
+import ipywidgets as widgets
 from IPython.display import display, clear_output, HTML
 
 try:
@@ -55,7 +55,7 @@ def extract(arg):
     volume = pull_volume_control.value
     update_notification("Received extract for: %d μl from port %d on serial port %s" % (volume,
           valve, serial_port))
-    if len(sp) > 0:
+    if device_dict and serial_port in device_dict:
         device_dict[serial_port].extract(valve, volume)
     pull_button.disabled = False
 
@@ -71,7 +71,7 @@ def dispense(arg):
     volume = push_volume_control.value
     update_notification("Received dispense for: %d μl from port %d on serial port %s" % (volume,
           valve, serial_port))
-    if len(sp) > 0:
+    if device_dict and serial_port in device_dict:
         device_dict[serial_port].dispense(valve, volume)
     push_button.disabled = False
 

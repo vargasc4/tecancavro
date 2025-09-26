@@ -21,6 +21,10 @@ except:
 
 from .syringe import Syringe, SyringeError, SyringeTimeout
 
+from PyQt5.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
+    QPushButton, QTextEdit, QMessageBox, QSpinBox, QComboBox
+)
 
 class XCaliburD(Syringe):
     """
@@ -39,8 +43,8 @@ class XCaliburD(Syringe):
                    30: 70, 31: 60, 32: 50, 33: 40, 34: 30, 35: 20, 36: 18,
                    37: 16, 38: 14, 39: 12, 40: 10}
 
-    def __init__(self, com_link, num_ports=9, syringe_ul=1000, direction='CW',
-                 microstep=False, waste_port=9, slope=14, init_force=0,
+    def __init__(self, com_link, num_ports=6, syringe_ul=500, direction='CW',
+                 microstep=True, waste_port=6, slope=14, init_force=0,
                  debug=False, debug_log_path='.'):
         """
         Object initialization function.
@@ -267,6 +271,17 @@ class XCaliburD(Syringe):
             self.movePlungerAbs(0)
             delay = self.executeChain()
             self.waitReady(delay)
+    def _ulToSteps(self, volume_ul: int) -> int:
+        """
+        Convert µL to steps using self.syringe_ul and current microstep state.
+        """
+        syringe_ul = getattr(self, "syringe_ul", 500)
+        micro = getattr(self, "microstep", True)
+        full_scale = 24000 if micro else 3000
+        steps = int(round(volume_ul * (full_scale / float(syringe_ul))))
+        if steps < 0:
+            steps = 0
+        return steps
 
     #########################################################################
     # Command chain functions                                               #
@@ -719,6 +734,15 @@ class XCaliburD(Syringe):
     #########################################################################
     # Communication handlers and special functions                          #
     #########################################################################
+    def _simIncToPulses(self, speed_code):
+        """
+        Updates sim_state['top_speed'] to correspond to the selected speed code.
+        """
+        if speed_code not in self.SPEED_CODES:
+            # Clamp to valid speed codes
+            speed_code = min(max(0, speed_code), 40)
+        pulses = self.SPEED_CODES[speed_code]
+        self.sim_state['top_speed'] = pulses
 
     @contextmanager
     def _syringeErrorHandler(self):
@@ -758,6 +782,19 @@ class XCaliburD(Syringe):
         except Exception as e:
             self.resetChain()
             raise e
+    def _calcPlungerMoveTime(self, steps):
+        """
+        Estimate the time in seconds it will take to move 'steps' steps
+        at the current top speed. If top speed is not known, assume 6000 pps
+        (full speed, fastest default).
+        """
+        # Get top speed from state if available, else use 6000 pulses/sec as a default
+        top_speed = self.sim_state.get("top_speed") or self.state.get("top_speed") or 6000
+        if not top_speed or top_speed <= 0:
+            top_speed = 6000
+        move_time = steps / float(top_speed)
+        # A slight fudge-factor to avoid simulation underestimating
+        return max(move_time, 0.01)
 
     def waitReady(self, timeout=10, polling_interval=0.3, delay=None):
         """
@@ -774,18 +811,14 @@ class XCaliburD(Syringe):
 
     def sendRcv(self, cmd_string, execute=False):
         """
-        Send a raw command string and return a tuple containing the parsed
-        response data: (Data, Ready). If the syringe is ready to accept
-        another command, `Ready` with be 'True'.
+        Send a raw command string and return the parsed response data.
 
         Args:
-            `cmd_string` (bytestring) : a valid Tecan XCalibur command string
+            cmd_string (str): valid XCalibur command string
         Kwargs:
-            `execute` : if 'True', the execute byte ('R') is appended to the
-                        `cmd_string` prior to sending
+            execute (bool): if True, append 'R' before sending
         Returns:
-            `parsed_reponse` (tuple) : parsed pump response tuple
-
+            data (str): the data field from the parsed response
         """
         self.logCall('sendRcv', locals())
 
@@ -795,87 +828,6 @@ class XCaliburD(Syringe):
         self.logDebug('sendRcv: sending cmd_string: {}'.format(cmd_string))
         with self._syringeErrorHandler():
             parsed_response = super(XCaliburD, self)._sendRcv(cmd_string)
-            self.logDebug('sendRcv: received response: {}'.format(
-                          parsed_response))
+            self.logDebug('sendRcv: received response: {}'.format(parsed_response))
             data = parsed_response[0]
             return data
-
-    def _calcPlungerMoveTime(self, move_steps):
-        """
-        Calculates plunger move time using equations provided by Tecan.
-        Assumes that all input values have been validated
-
-        """
-        sd = self.sim_state
-        start_speed = sd['start_speed']
-        top_speed = sd['top_speed']
-        cutoff_speed = sd['cutoff_speed']
-        slope = sd['slope']
-        microstep = sd['microstep']
-
-        slope *= 2500.0
-        if microstep:
-            move_steps = move_steps / 8.0
-        theo_top_speed = sqrt((4.0 * move_steps*slope) + start_speed ** 2.0)
-        # If theoretical top speed will not exceed cutoff speed
-        if theo_top_speed < cutoff_speed:
-            move_t = theo_top_speed - (start_speed/slope)
-        else:
-            theo_top_speed = sqrt(((2.0*move_steps*slope) +
-                                  ((start_speed**2.0+cutoff_speed**2.0)/2.0)))
-        # If theoretical top speed with exceed cutoff speed but not
-        # reach the set top speed
-        if cutoff_speed < theo_top_speed < top_speed:
-            move_t = ((1 / slope) * (2.0 * theo_top_speed - start_speed -
-                                     cutoff_speed))
-        # If start speed, top speed, and cutoff speed are all the same
-        elif start_speed == top_speed == cutoff_speed:
-            move_t = (2.0 * move_steps) / top_speed
-        # Otherwise, calculate time spent in each phase (start, constant,
-        # ramp down)
-        else:
-            ramp_up_halfsteps = ((top_speed ** 2.0 - start_speed ** 2.0) /
-                                (2.0 * slope))
-            ramp_down_halfsteps = ((top_speed ** 2.0 - cutoff_speed ** 2.0) /
-                                  (2.0 * slope))
-            if (ramp_up_halfsteps + ramp_down_halfsteps) < (2.0 * top_speed):
-                ramp_up_t = (top_speed - start_speed) / slope
-                ramp_down_t = (top_speed - cutoff_speed) / slope
-                constant_halfsteps = (2.0 * move_steps - ramp_up_halfsteps -
-                                      ramp_down_halfsteps)
-                constant_t = constant_halfsteps / top_speed
-                move_t = ramp_up_t + ramp_down_t + constant_t
-        return move_t
-
-    def _ulToSteps(self, volume_ul, microstep=None):
-        """
-        Converts a volume in microliters (ul) to encoder steps.
-
-        Args:
-            `volume_ul` (int) : volume in microliters
-        Kwargs:
-            `microstep` (bool) : whether to convert to standard steps or
-                                 microsteps
-
-        """
-        if microstep is None:
-            microstep = self.state['microstep']
-        if microstep:
-            steps = volume_ul * (24000/self.syringe_ul)
-        else:
-            steps = volume_ul * (3000/self.syringe_ul)
-        return steps
-
-    def _simIncToPulses(self, speed_inc):
-        """
-        Updates simulation speeds given a speed increment setting (`speed_inc`)
-        following XCalibur handling of speed changes (i.e. cutoff speed cannot
-        be higher than top speed, so it is automatically adjusted on the pump)
-
-        """
-        top_speed = self.__class__.SPEED_CODES[speed_inc]
-        self.sim_state['top_speed'] = top_speed
-        if self.sim_state['start_speed'] > top_speed:
-            self.sim_state['start_speed'] = top_speed
-        if self.sim_state['cutoff_speed'] > top_speed:
-            self.sim_state['cutoff_speed'] = top_speed

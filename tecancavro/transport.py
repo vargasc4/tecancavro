@@ -41,34 +41,30 @@ from .tecanapi import TecanAPI, TecanAPITimeout
 # From http://stackoverflow.com/questions/12090503/
 #      listing-available-com-ports-with-python
 def listSerialPorts():
-    """Lists serial ports
-
-    :raises EnvironmentError:
-        On unsupported or unknown platforms
-    :returns:
-        A list of available serial ports
-    """
     if sys.platform.startswith('win'):
-        ports = ['COM' + str(i + 1) for i in range(256)]
-
+        ports = ['COM11', 'COM12', 'COM13']
     elif sys.platform.startswith('linux') or sys.platform.startswith('cygwin'):
-        # this is to exclude your current terminal "/dev/tty"
         ports = glob.glob('/dev/tty[A-Za-z]*')
-
     elif sys.platform.startswith('darwin'):
         ports = glob.glob('/dev/tty.*')
-
     else:
         raise EnvironmentError('Unsupported platform')
+
+    print("Checking ports:", ports)  # <-- Debug print
 
     result = []
     for port in ports:
         try:
+            print(f"Trying port {port}...")
             s = serial.Serial(port)
             s.close()
+            print(f"✔ Port {port} is available")
             result.append(port)
-        except (OSError, serial.SerialException):
+        except (OSError, serial.SerialException) as e:
+            print(f"✘ Port {port} failed: {e}")
             pass
+
+    print("Final result:", result)
     return result
 
 
@@ -83,30 +79,45 @@ class TecanAPISerial(TecanAPI):
     ser_mapping = {}
 
     @classmethod
-    def findSerialPumps(cls, tecan_addrs=[0], ser_baud=9600, ser_timeout=0.2,
+    def findSerialPumps(cls, tecan_addrs=[0], ser_baud=9600, ser_timeout=0.1,
                         max_attempts=2):
-        ''' Find any enumerated syringe pumps on the local com / serial ports.
-
-        Returns list of (<ser_port>, <pump_config>, <pump_firmware_version>)
-        tuples.
-        '''
+        print("🔍 Starting search for serial pumps...")
         found_devices = []
-        for port_path in listSerialPorts():
+        ports = listSerialPorts()
+        print(f" - Ports found: {ports}")
+
+        for port_path in ports:
             for addr in tecan_addrs:
+                print(f"\n🛠️ Trying port {port_path} with address {addr}...")
                 try:
+                    # Open with a short timeout to prevent long hangs
                     p = cls(addr, port_path, ser_baud,
                             ser_timeout, max_attempts)
-                    config = p.sendRcv('?76')['data']
-                    fw_version = p.sendRcv('&')['data']
-                    found_devices.append((port_path, config, fw_version))
-                except OSError as e:
-                    if e.errno != 16:  # Resource busy
-                        raise
-                except TecanAPITimeout:
-                    pass
+
+                    # Wrap sendRcv in its own try to catch hanging behavior
+                    try:
+                        print(f"  🔄 Sending '?76' to {port_path}...")
+                        config = p.sendRcv('?76')['data']
+                        print(f"  ✅ Config response: {config}")
+
+                        print(f"  🔄 Sending '&' to {port_path}...")
+                        fw_version = p.sendRcv('&')['data']
+                        print(f"  ✅ Firmware version: {fw_version}")
+
+                        found_devices.append((port_path, config, fw_version))
+                        print(f"  🎉 Device found on {port_path} with address {addr}")
+                    except TecanAPITimeout:
+                        print(f"  ⏱️ Timeout waiting for response on {port_path}. Skipping.")
+                        continue
+
+                except (serial.SerialException, OSError) as e:
+                    print(f"  ✘ Failed on {port_path}: {e}")
+                    continue
+
+        print(f"\n✅ Search complete. Devices found: {len(found_devices)}")
         return found_devices
 
-    def __init__(self, tecan_addr, ser_port, ser_baud, ser_timeout=0.1,
+    def __init__(self, tecan_addr, ser_port, ser_baud, ser_timeout=0.5,
                  max_attempts=5):
 
         super(TecanAPISerial, self).__init__(tecan_addr)
