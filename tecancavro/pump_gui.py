@@ -138,6 +138,19 @@ class PumpGUI(QWidget):
         pos_layout.addWidget(self.pos_display)
         layout.addLayout(pos_layout)
 
+
+        # Flow rate controls
+        flow_layout = QHBoxLayout()
+        flow_layout.addWidget(QLabel("Set Flow Rate:"))
+        self.flow_rate_input = QLineEdit()
+        self.flow_rate_input.setFixedWidth(100)
+        flow_layout.addWidget(self.flow_rate_input)
+        flow_layout.addWidget(QLabel("µL/min"))
+        self.set_flow_btn = QPushButton("Set Flow Rate")
+        self.set_flow_btn.clicked.connect(self.set_flow_rate)
+        flow_layout.addWidget(self.set_flow_btn)
+        layout.addLayout(flow_layout)
+
         # Change port selector
         cp_layout = QHBoxLayout()
         cp_layout.addWidget(QLabel("Change to Port:"))
@@ -162,20 +175,6 @@ class PumpGUI(QWidget):
         io_speed_layout.addWidget(self.extract_speed_code_input)
 
         layout.addLayout(io_speed_layout)
-
-        # Flow rate controls
-        flow_layout = QHBoxLayout()
-        flow_layout.addWidget(QLabel("Set Flow Rate:"))
-        self.flow_rate_input = QLineEdit()
-        self.flow_rate_input.setFixedWidth(100)
-        flow_layout.addWidget(self.flow_rate_input)
-        flow_layout.addWidget(QLabel("µL/min"))
-        self.set_flow_btn = QPushButton("Set Flow Rate")
-        self.set_flow_btn.clicked.connect(self.set_flow_rate)
-        flow_layout.addWidget(self.set_flow_btn)
-        layout.addLayout(flow_layout)
-
-
         # Extract controls
         ex_layout = QHBoxLayout()
         ex_layout.addWidget(QLabel("Extract from port:"))
@@ -229,6 +228,13 @@ class PumpGUI(QWidget):
         self.etw_speed_edit.setFixedWidth(60)
         etw_layout.addWidget(self.etw_speed_edit)
 
+        # Add WASTE PORT spin box just like in PRIME
+        etw_layout.addWidget(QLabel("Waste port:"))
+        self.etw_waste_spin = QSpinBox()
+        self.etw_waste_spin.setRange(1, 6)
+        self.etw_waste_spin.setValue(6)
+        etw_layout.addWidget(self.etw_waste_spin)
+
         self.etw_flush_chk = QCheckBox("Flush after")
         self.etw_flush_chk.setChecked(False)
         etw_layout.addWidget(self.etw_flush_chk)
@@ -238,6 +244,7 @@ class PumpGUI(QWidget):
         etw_layout.addWidget(etw_btn)
 
         layout.addLayout(etw_layout)
+
 
         # Dump to Waste
         dump_layout = QHBoxLayout()
@@ -645,13 +652,14 @@ class PumpGUI(QWidget):
                 if not (0 <= sc <= 40):
                     raise ValueError("Speed code must be 0–40")
                 speed_code = sc
+            waste_port = int(self.etw_waste_spin.value())  # <- ADD waste port selection
             flush = self.etw_flush_chk.isChecked()
-            self._run_worker(self._extract_to_waste_worker, in_port, volume, speed_code, flush)
+            self._run_worker(self._extract_to_waste_worker, in_port, volume, speed_code, flush, waste_port)
         except Exception as e:
             self.show_error(str(e))
             self._disable_actions(False)
 
-    def _extract_to_waste_worker(self, in_port, volume, speed_code, flush):
+    def _extract_to_waste_worker(self, in_port, volume, speed_code, flush, waste_port):
         # Multi-pull logic
         syringe_ul = getattr(self.pump, "syringe_ul", 500)
         pulls = []
@@ -661,19 +669,20 @@ class PumpGUI(QWidget):
         msg_parts = []
         for _ in range(full_pulls):
             self.pump.extractToWaste(
-                in_port, syringe_ul, speed_code=speed_code, flush=flush
+                in_port, syringe_ul, out_port=waste_port, speed_code=speed_code, flush=flush
             )
             self.pump.waitReady()
             msg_parts.append(f"{syringe_ul}µL")
 
         if remainder > 0:
             self.pump.extractToWaste(
-                in_port, remainder, speed_code=speed_code, flush=flush
+                in_port, remainder, out_port=waste_port, speed_code=speed_code, flush=flush
             )
             self.pump.waitReady()
             msg_parts.append(f"{remainder}µL")
 
         msg = (f"Extract-to-waste complete: {volume} µL from in-port {in_port} "
+               f"to waste port {waste_port} "
                f"in {full_pulls + (1 if remainder > 0 else 0)} transfer(s)"
                + (f", speed={speed_code}" if speed_code is not None else "")
                + (", flushed" if flush else "")
@@ -1075,20 +1084,38 @@ class PumpGUI(QWidget):
     def run_custom_protocol(self):
         steps = []
         for row in range(self.protocol_table.rowCount()):
-            action = self.protocol_table.cellWidget(row, 0).currentText().strip().lower()
-            src_port = self.protocol_table.cellWidget(row, 1).currentText()
-            dest_port = self.protocol_table.cellWidget(row, 2).currentText()
-            vol = int(self.protocol_table.item(row, 3).text())
-            speed_code = int(self.protocol_table.cellWidget(row, 4).currentText())
-            repeat = int(self.protocol_table.item(row, 5).text())
-            steps.append({
-                "action": action,
-                "src_port": src_port,
-                "dest_port": dest_port,
-                "vol": vol,
-                "repeat": repeat,
-            })
+            try:
+                # Defensive extraction:
+                action_widget = self.protocol_table.cellWidget(row, 0)
+                src_widget = self.protocol_table.cellWidget(row, 1)
+                dest_widget = self.protocol_table.cellWidget(row, 2)
+                vol_item = self.protocol_table.item(row, 3)
+                rep_item = self.protocol_table.item(row, 4)
+
+                action = action_widget.currentText().strip().lower() if action_widget else ""
+                src_port = src_widget.currentText() if src_widget else ""
+                dest_port = dest_widget.currentText() if dest_widget else ""
+
+                # Handle empty or non-numeric
+                vol = int(vol_item.text()) if (vol_item and vol_item.text().isdigit()) else 0
+                repeat = int(rep_item.text()) if (rep_item and rep_item.text().isdigit()) else 1
+
+                if not action or not src_port or not dest_port or vol <= 0 or repeat <= 0:
+                    self.log(f"Skipping invalid protocol row {row+1}")
+                    continue
+                steps.append({
+                    "action": action,
+                    "src_port": src_port,
+                    "dest_port": dest_port,
+                    "vol": vol,
+                    "repeat": repeat,
+                })
+            except Exception as e:
+                self.log(f"Error parsing protocol row {row+1}: {e}")
         protocol_repeat = self.proto_repeat_spin.value() if hasattr(self, "proto_repeat_spin") else 1
+        if not steps:
+            self.show_error("No valid protocol steps found.")
+            return
         self._run_worker(self._execute_custom_protocol, steps, protocol_repeat)
 
     def _execute_custom_protocol(self, steps, protocol_repeat=1):

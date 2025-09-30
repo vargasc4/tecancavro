@@ -243,14 +243,16 @@ class XCaliburD(Syringe):
             out_port = self.waste_port
         if speed_code is not None:
             self.setSpeed(speed_code)
+        # CHOOSE CORRECT FULL SCALE FOR THIS SYRINGE
+        full_scale = 24000 if getattr(self, "microstep", True) else 3000
         if volume_ul > self.syringe_ul:
-            num_rounds = volume_ul / self.syringe_ul
+            num_rounds = volume_ul // self.syringe_ul
             remainder_ul = volume_ul % self.syringe_ul
             self.changePort(out_port, from_port=in_port)
             self.movePlungerAbs(0)
-            for x in xrange(num_rounds):
+            for x in range(int(num_rounds)):
                 self.changePort(in_port, from_port=out_port)
-                self.movePlungerAbs(3000)
+                self.movePlungerAbs(full_scale)
                 self.changePort(out_port, from_port=in_port)
                 self.movePlungerAbs(0)
                 delay = self.executeChain()
@@ -271,6 +273,7 @@ class XCaliburD(Syringe):
             self.movePlungerAbs(0)
             delay = self.executeChain()
             self.waitReady(delay)
+
     def _ulToSteps(self, volume_ul: int) -> int:
         """
         Convert µL to steps using self.syringe_ul and current microstep state.
