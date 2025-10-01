@@ -527,7 +527,7 @@ class PumpGUI(QWidget):
 
             # Address 0 is typical default
             self.com_link = TecanAPISerial(0, port, baud)
-            self.pump = XCaliburD(self.com_link)
+            self.pump = XCaliburD(self.com_link, syringe_ul=500)
 
             # Probe responsiveness
             try:
@@ -976,12 +976,16 @@ class PumpGUI(QWidget):
             on = self.micro_chk.isChecked()
             self._disable_actions(True)
             self.pump.setMicrostep(on=on)
+            # Always set the attribute in your model
+            setattr(self.pump, "microstep", on)
+            # Make sure your GUI reflects the state
             self._apply_microstep_ranges(on)
             self.log(f"Microstep {'ON' if on else 'OFF'} applied.")
         except Exception as e:
             self.show_error(str(e))
         finally:
             self._disable_actions(False)
+
 
     def refresh_status(self):
         try:
@@ -1025,17 +1029,13 @@ class PumpGUI(QWidget):
             if flow_ul_min <= 0:
                 raise ValueError("Flow rate must be positive")
 
-            # Calculation: µL/min -> pulses/sec (pps)
-            # Steps:
-            #   1. Calculate steps/sec for the desired flow rate.
-            #   2. 1 step = syringe_ul/full_scale µL
-            #   3. steps/sec = [flow_ul_min / 60] / [syringe_ul/full_scale]
             syringe_ul = getattr(self.pump, "syringe_ul", 500)
-            micro = getattr(self.pump, "microstep", True)
-            full_scale = 24000 if micro else 3000
+            # IMPORTANT: Use base-scale for speed regardless of microstep mode
+            base_scale_for_speed = 3000  # V units align to encoder-scale, not microstep-scale
 
-            # [steps/sec] = (flowrate [uL/min]/60) * (full_scale/syringe_ul)
-            steps_per_sec = (flow_ul_min / 60.0) * (full_scale / syringe_ul)
+            # μL/min / 60 = μL/sec
+            # (μL/sec) × (base_steps/μL) = steps/sec (pps) for V
+            steps_per_sec = (flow_ul_min / 60.0) * (base_scale_for_speed / syringe_ul)
             pps = int(round(steps_per_sec))
 
             # Clamp to allowed pump limits
@@ -1047,10 +1047,11 @@ class PumpGUI(QWidget):
             self._send(f"V{pps}")
             self.log(
                 f"Set top speed to {pps} pulses/sec for flow {flow_ul_min} µL/min "
-                f"({'microstep' if micro else 'normal'}, syringe {syringe_ul} µL)"
+                f"(speed scale uses 3000 steps/syringe, syringe {syringe_ul} µL)"
             )
         except Exception as e:
             self.show_error(str(e))
+
 
     #########################################################################
     # Protocol                                                              #
@@ -1317,14 +1318,15 @@ class PumpGUI(QWidget):
 
     def _pps_for_flow(self, flow_ul_min: float) -> int:
         """
-        Convert a target flow in µL/min into pulses/sec for the current syringe and microstep state.
+        Convert a target flow in µL/min into pulses/sec for the current syringe.
+        Note: Speed V is computed on a base encoder scale (3000), independent of microstep.
         """
         if flow_ul_min <= 0:
             raise ValueError("Flow rate must be positive")
         syringe_ul = getattr(self.pump, "syringe_ul", 500)
-        micro = getattr(self.pump, "microstep", True)
-        full_scale = 24000 if micro else 3000
-        steps_per_sec = (flow_ul_min / 60.0) * (full_scale / syringe_ul)
+        base_scale_for_speed = 3000  # do not use microstep scale for V
+        # μL/min / 60 = μL/sec; (μL/sec) × (base_steps/μL) = steps/sec
+        steps_per_sec = (flow_ul_min / 60.0) * (base_scale_for_speed / syringe_ul)
         pps = int(round(steps_per_sec))
         if pps < 5:    pps = 5
         if pps > 6000: pps = 6000
@@ -1503,8 +1505,7 @@ class PumpGUI(QWidget):
 
     def _volume_to_steps(self, volume_ul: int) -> int:
         """
-        Convert µL to steps using pump.syringe_ul and microstep if available.
-        Falls back to 500 µL syringe and microstep=True.
+        Convert µL to steps using pump.syringe_ul and current microstep state.
         """
         syringe_ul = getattr(self.pump, "syringe_ul", 500) if self.pump else 500
         micro = getattr(self.pump, "microstep", True) if self.pump else True
@@ -1512,7 +1513,9 @@ class PumpGUI(QWidget):
         steps = int(round(volume_ul * (full_scale / float(syringe_ul))))
         if steps < 0:
             steps = 0
+        self.log(f"DEBUG: _volume_to_steps: {volume_ul} uL x ({full_scale} step/{syringe_ul} uL) = {steps} steps (microstep={micro})")
         return steps
+
 
     def _apply_microstep_ranges(self, micro: bool):
         """
